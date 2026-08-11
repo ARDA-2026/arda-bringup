@@ -14,6 +14,11 @@ give-up 카운트다운 시작/보류 → 연속매칭 카운트 → 확정/포�
 `show=True`(main.py의 --show-thermal)면 관찰 중인 동안 로컬 디스플레이에도
 컬러맵 창을 띄운다 — report_url 웹 스트리밍과 별개로, DISPLAY가 붙어있는
 환경에서 바로 눈으로 확인하고 싶을 때 쓴다.
+
+매 프레임 판정 결과(matched/consecutive/confirmed 등, 기존 debug 로그와
+동일한 값)를 `bus.thermal_status_q`에도 얹는다(웹 시각화/rosbag 기록
+전용 — 판정 로직 자체는 안 건드림, arda_bringup의 `radar_frame_q`/
+`servo_status_q`와 같은 원칙).
 """
 
 import threading
@@ -174,6 +179,28 @@ def _run_observation(
             "[관찰 %d] matched=%s consecutive=%d/%d moving=%s confirmed=%s",
             frame_number, detection.matched, consecutive, required_consecutive, moving, confirmed,
         )
+
+        # 웹 시각화/rosbag 기록용 상태 스냅샷 (선택적) — 위 debug 로그와
+        # 정확히 같은 값이다. 판정 로직 자체는 전혀 건드리지 않는 부가
+        # 발행 — "사람 확정까지 얼마나 가까워졌는지"(연속 매칭 프레임 수)를
+        # 기본 로그 레벨(INFO)에서도, ROS 토픽으로도 볼 수 있게 한다.
+        bus.thermal_status_q.put({
+            "ts": time.time(),
+            "frame_number": frame_number,
+            "matched": bool(detection.matched),
+            "consecutive": consecutive,
+            "required_consecutive": required_consecutive,
+            "moving": moving,
+            "confirmed": confirmed,
+            "offset": offset,
+            "give_up_remaining_sec": (
+                max(0.0, give_up_deadline - time.monotonic())
+                if give_up_deadline is not None else None
+            ),
+            # "사람인지" 판정에 실제로 쓰이는 수치(원형도/종횡비/채움비율 등)
+            # + 그 임계값 — matched가 왜 true/false인지 바로 보인다.
+            "detail": tb.detection_detail(detection),
+        })
 
         # 실시간 스트리밍 — 관찰(dwell) 중인 동안 매 프레임 기존 lat/lon/time
         # 리포트 포맷에 이미지를 얹어 반복 전송한다(사용자 지시). 관찰 중이

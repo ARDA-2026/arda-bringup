@@ -8,9 +8,10 @@ arda-algo_general/hanriver.py(drone_control 브랜치)는 원래 파티클
 
 - `/arda/tracker/absolute_pose`, `/arda/drift/particles`,
   `/arda/drift/target_waypoint`, `/arda/drift/stranded`,
-  `/arda/drift/waypoints_json`, `/arda/tracker/thermal_image` 를 구독해
-  hanriver.py 의 `sim_state` 와 동일한 JSON 스키마를 만들어 `/state`
-  (REST) 와 `/ws` (WebSocket, 100ms 주기) 로 내보낸다.
+  `/arda/drift/waypoints_json`, `/arda/tracker/thermal_image`,
+  `/arda/tracker/radar_frame` 를 구독해 hanriver.py 의 `sim_state` 와
+  동일한 JSON 스키마를 만들어 `/state`(REST)와 `/ws`(WebSocket, 100ms
+  주기)로 내보낸다.
 - 히트맵/Waypoint/지도(map) 설정은 drift_node가 `/arda/drift/waypoints_json`
   (JSON 문자열)으로 이미 계산해 보낸 것을 그대로 신뢰해서 쓴다 — 커스텀
   ROS 메시지 인터페이스 패키지를 새로 만들지 않으려는 실용적 선택이다
@@ -126,6 +127,8 @@ class WebBridgeNode(Node):
             # 사람 확정 순간의 열화상 스냅샷 (패널 맨 위 카드용) — 확정 전엔 둘 다 None
             'confirmed_thermal_jpg_b64': None,
             'confirmed_at': None,
+            # 레이더 포인트클라우드 시각화 스냅샷(선택적, on/off) — 아직 없으면 None
+            'radar_frame': None,
         }
         self._start_time = self.get_clock().now()
         self._has_entry = False
@@ -163,6 +166,9 @@ class WebBridgeNode(Node):
         self.create_subscription(
             String, '/arda/drift/waypoints_json',
             self._on_waypoints_json, 10)
+        self.create_subscription(
+            String, '/arda/tracker/radar_frame',
+            self._on_radar_frame, 10)
 
         # 드론 제어 라우터에 상태 제공자 등록 (hanriver.py 의
         # drone_api.set_state_provider(_state_snapshot) 와 동일한 패턴)
@@ -393,6 +399,18 @@ class WebBridgeNode(Node):
             self._state['best_trail_lats'].append(best_lat)
             self._state['best_trail_lons'] = self._state['best_trail_lons'][-self._max_trail:]
             self._state['best_trail_lats'] = self._state['best_trail_lats'][-self._max_trail:]
+
+    def _on_radar_frame(self, msg: String):
+        # tracker_node가 enable_radar_view일 때만 5Hz로 발행하는 레이더
+        # 포인트클라우드/클러스터 스냅샷 — 그대로 상태에 실어 /state, /ws로
+        # 내보낸다(여기서 재계산하지 않음).
+        try:
+            payload = json.loads(msg.data)
+        except Exception as exc:
+            self.get_logger().warn(f'레이더 프레임 파싱 실패: {exc}')
+            return
+        with self._lock:
+            self._state['radar_frame'] = payload
 
     def _on_waypoints_json(self, msg: String):
         # drift_node가 계산한 waypoints/heatmap/지도 설정을 그대로 반영

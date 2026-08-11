@@ -14,7 +14,10 @@ confidence가 더 높은 새 후보가 와도 선점하지 않는다(arda-radar/
 
 RealtimePlotter는 쓰지 않는다 — matplotlib GUI 이벤트 루프는 메인 스레드
 전용이라 통합 프로세스(백그라운드 스레드)에서는 안전하지 않다. 3D 플롯이
-필요하면 arda-radar를 단독 실행할 것.
+필요하면 arda-radar를 단독 실행할 것. 대신 웹 시각화용으로 클러스터링
+직후 포인트클라우드/클러스터 스냅샷을 bus.radar_frame_q에 얹는 한 줄이
+추가돼 있다(arda_bringup의 enable_radar_view가 소비) — 낙하 감지 로직
+자체는 건드리지 않는 부가 발행이다.
 """
 
 import threading
@@ -84,6 +87,17 @@ def run(
             pc = filter_stationary(pc, min_abs_doppler=cfg["min_abs_doppler"])
 
             clusters = cluster_points(pc, eps=cfg["cluster_eps"], min_samples=cfg["cluster_min_samples"])
+
+            # 웹 시각화용 스냅샷 (선택적, arda_bringup의 enable_radar_view가
+            # 소비) — 낙하 감지 로직에는 전혀 영향 없는 부가 발행.
+            bus.radar_frame_q.put({
+                "ts": time.time(),
+                "points": pc.xyz.tolist(),
+                "n_clusters": len(clusters),
+                "cluster_centroids": [
+                    c.centroid().tolist() for c in clusters if c.centroid() is not None
+                ],
+            })
 
             fell = detector.update(clusters)
 

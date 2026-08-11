@@ -34,6 +34,12 @@ Thumbs.db
 *.bag
 *.db3
 
+# rosbag2 녹화본 (record.sh 출력 — metadata.yaml 등 포함 통째로 무시)
+bags/
+
 # 설정 (민감 정보)
 config/secrets.yaml
 add.md
+
+# 개인 작업 메모 (공식 문서는 README.md)
+sensor.md

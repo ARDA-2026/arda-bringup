@@ -82,3 +82,36 @@ class YoloBackend(Backend):
     def draw(self, image, detection, confirmed):
         candidates, best = detection.state
         self._mod.draw_person_candidates(image, candidates, best, confirmed)
+
+
+def detection_detail(detection: Detection) -> dict:
+    """detection.state(백엔드별로 구조가 다름)에서 "사람인지" 판정에 실제로
+    쓰이는 수치를 뽑아 공용 dict로 만든다 — 시각화/rosbag 기록 전용, 판정
+    로직 자체는 읽기만 하고 손대지 않는다.
+
+    ThresholdBackend(기본)는 원형도(circularity)/종횡비/채움비율/코어중심
+    오프셋 — 전부 thermal_main.is_head_shape()가 실제로 비교하는 값과
+    그 임계값을 같이 넣어서, 지금 값이 임계값에 얼마나 가까운지("사람인지
+    잡는 그 포인트") 바로 볼 수 있게 한다. YoloBackend(--yolo)는 최고
+    확률 후보의 confidence만 있다."""
+    state = detection.state
+    if isinstance(state, dict):  # ThresholdBackend — thermal_main.detect_hot_region() 반환값
+        return {
+            "backend": "threshold",
+            "circularity": state.get("circularity"),
+            "circularity_min": thermal_main.MIN_CIRCULARITY,
+            "aspect_ratio": state.get("aspect_ratio"),
+            "aspect_ratio_range": [thermal_main.MIN_ASPECT_RATIO, thermal_main.MAX_ASPECT_RATIO],
+            "fill_ratio": state.get("fill_ratio"),
+            "fill_ratio_min": thermal_main.MIN_FILL_RATIO,
+            "core_center_offset_ratio": state.get("core_center_offset_ratio"),
+            "core_center_offset_ratio_max": thermal_main.MAX_CORE_CENTER_OFFSET_RATIO,
+            "pixel_area": state.get("pixel_area"),
+        }
+    if isinstance(state, tuple) and len(state) == 2:  # YoloBackend — (candidates, best)
+        _candidates, best = state
+        return {
+            "backend": "yolo",
+            "confidence": best.get("confidence") if best else None,
+        }
+    return {"backend": "none"}  # 이번 프레임은 발열 영역 자체를 못 찾음(state=None)

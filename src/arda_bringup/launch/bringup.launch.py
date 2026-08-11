@@ -1,3 +1,11 @@
+# 센서(tracker_node, raset을 스레드로 구동) + 알고리즘(drift_node, 표류
+# 예측/드론 미션) + 웹 브릿지(web_bridge_node, FastAPI+드론 제어)를 노드
+# 3개로 묶은 단일 통합 런치 파일 — 세 패키지를 따로 실행할 필요 없이
+# `ros2 launch arda_bringup bringup.launch.py`(또는 워크스페이스 루트의
+# `./run.sh`) 한 번으로 전부 뜬다. 빌드도 colcon 한 번(README "🚀 빠른
+# 시작" 참고)이면 되고, arda-radar/arda-servo/thermal-camera 세 저장소는
+# 코드를 따로 실행하는 게 아니라 tracker_node가 sys.path로 라이브러리처럼
+# import만 한다(radar_dir/servo_dir/thermal_dir 파라미터로 경로만 알려줌).
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
@@ -18,21 +26,55 @@ def generate_launch_description():
                 #   예: '/home/user/arda-radar'
                 # 셋 다 비워두면 tracker_node는 센서 없이 대기 상태로만 남습니다.
                 # ════════════════════════════════════════════════════════
-                'radar_dir': '',    # ← arda-radar 경로 입력
-                'servo_dir': '',    # ← arda-servo 경로 입력
-                'thermal_dir': '',  # ← thermal-camera 경로 입력
+                'radar_dir': '/home/orin/ARDA-2026/arda-radar',
+                'servo_dir': '/home/orin/ARDA-2026/arda-servo',
+                'thermal_dir': '/home/orin/ARDA-2026/thermal-camera',
 
                 # arda-raset main.py의 CLI 옵션과 동일 (필요시만 조정):
                 'simulate_servo': False,
                 'simulate_thermal': False,
                 'no_radar': False,
-                'yolo': False,
-                'dwell_seconds': 10.0,
+                # --yolo 플래그와 동일 — true면 열화상 판정을 threshold
+                # (원형도/종횡비 기반) 대신 커스텀 YOLO 모델로 한다.
+                
+                # GPU 연결이 안 됐을 경우, False가 되어 자동으로 CPU로 대체된다(에러는 안 나지만
+                # 추론이 느려짐 — thermal_main_yolo.load_yolo_model() 참고).
+                'yolo': True,
+                'model_path': '',
+                'confidence_threshold': 0.4,
+                'device': 'cuda',
+                # dwell_seconds: 레이더 트리거 후 열화상이 "사람인지" 관찰하는
+                # 최대 시간(초). 실기 테스트 때 트리거 후 카메라 앞으로
+                # 이동해서 사람 확정(person=True)까지 재현해보려면 기본
+                # 10초는 너무 짧다 — 30초로 늘려서 여유를 준다. 다 튜닝되면
+                # 운영 환경에선 다시 줄여도 된다(응답성 vs 테스트 편의 트레이드오프).
+                'dwell_seconds': 30.0,
                 'required_consecutive': 3,
                 'settle_offset': 0.15,
-                'thermal_pending_timeout': 10.0,
+                # -1 = 자동으로 dwell_seconds + 30.0 사용 (tracker_node.py
+                # _start_raset() 참고). 이 값이 dwell_seconds보다 여유
+                # 있게 크지 않으면 레이더가 열화상 판정을 먼저 포기해버려
+                # 낙하 확정이 drift_node로 전달 안 되는 버그가 있었음(실측
+                # 확인 — 열원이 화면 가장자리에서 계속 "움직이는" 채로
+                # 오래 끄는 경우 40초 넘게 걸리는 것도 실측됨, 완전한 상한
+                # 보장은 아니니 필요하면 더 늘릴 것) — 반드시 dwell_seconds
+                # 보다 충분히 크게 명시하거나 -1(자동)로 둘 것.
+                # dwell_seconds를 늘리면 이 값도 자동으로 같이 늘어난다
+                # (지금 20+30=50초).
+                'thermal_pending_timeout': -1.0,
                 'radar_cli_port': '/dev/ttyUSB0',
                 'radar_data_port': '/dev/ttyUSB1',
+
+                # 센서 시각화 on/off — 웹 패널의 체크박스로도 별도 제어되며,
+                # 여기서 끄면 해당 토픽 자체를 발행하지 않는다.
+                'enable_thermal_view': True,
+                'enable_radar_view': True,
+               
+                # raset main.py의 --show-thermal과 동일 — 관찰 중 열화상
+                # 컬러맵을 이 보드에 붙은 모니터(X11, DISPLAY 필요)에도
+                # 로컬 창으로 띄운다. enable_thermal_view(ROS/웹 발행)와는
+                # 독립적 — DISPLAY 없으면 자동으로 무시된다.
+                'show_thermal': False,
             }],
         ),
         Node(

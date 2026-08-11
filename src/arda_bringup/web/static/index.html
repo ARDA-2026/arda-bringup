@@ -194,6 +194,35 @@ h2 { font-size: 14px; color: var(--accent); text-align: center; padding-bottom: 
          style="width:100%;border-radius:4px;display:block;margin-top:6px;">
   </div>
 
+  <!-- ── 센서 시각화 (on/off) ── -->
+  <div class="card">
+    <h3>🌡 열화상 실시간</h3>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="chk-thermal-view" onchange="onThermalViewToggle()"> 화면에 표시
+    </label>
+    <img id="thermal-view-img" src="" alt="열화상 실시간 스트림"
+         style="width:100%;border-radius:4px;display:none;margin-top:6px;"
+         onerror="this.style.opacity=0.3" onload="this.style.opacity=1">
+    <div id="thermal-view-empty" style="font-size:11px;color:var(--text-dim);margin-top:6px">
+      표시 꺼짐 — 체크박스로 켜세요 (관찰 중일 때만 프레임이 옵니다)
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>📡 레이더 포인트클라우드</h3>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="chk-radar-view" onchange="onRadarViewToggle()"> 화면에 표시
+    </label>
+    <canvas id="radar-view-canvas" width="260" height="180"
+            style="width:100%;border-radius:4px;display:none;margin-top:6px;background:var(--card2)"></canvas>
+    <div id="radar-view-empty" style="font-size:11px;color:var(--text-dim);margin-top:6px">
+      표시 꺼짐 — 체크박스로 켜세요
+    </div>
+    <div class="stat" id="radar-view-stat" style="display:none;margin-top:4px">
+      <span>포인트 / 클러스터</span><span class="val" id="radar-view-count">-</span>
+    </div>
+  </div>
+
   <!-- ── 드론 ── -->
   <div class="card" id="drone-card">
     <h3>드론 수색</h3>
@@ -394,6 +423,75 @@ function toggleTheme() {
   applyTheme();
 }
 const wpColor = i => C.wp[i % C.wp.length];
+
+// ─────────────────────────────────────────────
+// 센서 시각화 on/off (열화상 실시간 스트림 / 레이더 포인트클라우드)
+// ─────────────────────────────────────────────
+let thermalViewOn = localStorage.getItem('thermalViewOn') === '1';
+let radarViewOn   = localStorage.getItem('radarViewOn') === '1';
+let thermalPollTimer = null;
+
+function onThermalViewToggle() {
+  thermalViewOn = document.getElementById('chk-thermal-view').checked;
+  localStorage.setItem('thermalViewOn', thermalViewOn ? '1' : '0');
+  applyThermalView();
+}
+function applyThermalView() {
+  document.getElementById('chk-thermal-view').checked = thermalViewOn;
+  document.getElementById('thermal-view-img').style.display = thermalViewOn ? 'block' : 'none';
+  document.getElementById('thermal-view-empty').style.display = thermalViewOn ? 'none' : 'block';
+  if (thermalPollTimer) { clearInterval(thermalPollTimer); thermalPollTimer = null; }
+  if (thermalViewOn) {
+    const img = document.getElementById('thermal-view-img');
+    thermalPollTimer = setInterval(() => { img.src = '/thermal.jpg?t=' + Date.now(); }, 300);
+  }
+}
+
+function onRadarViewToggle() {
+  radarViewOn = document.getElementById('chk-radar-view').checked;
+  localStorage.setItem('radarViewOn', radarViewOn ? '1' : '0');
+  applyRadarView();
+}
+function applyRadarView() {
+  document.getElementById('chk-radar-view').checked = radarViewOn;
+  document.getElementById('radar-view-canvas').style.display = radarViewOn ? 'block' : 'none';
+  document.getElementById('radar-view-empty').style.display = radarViewOn ? 'none' : 'block';
+  document.getElementById('radar-view-stat').style.display = radarViewOn ? 'flex' : 'none';
+}
+
+// 레이더 ROI(arda-radar/config/settings.yaml 기준 x:[-1,1] y:[0.2,1.2])보다
+// 살짝 넉넉하게 잡은 캔버스 표시 범위 — 정밀 좌표축이 아니라 대략적인
+// 포인트 분포/클러스터 확인용.
+const RADAR_VIEW_X = [-1.3, 1.3], RADAR_VIEW_Y = [0, 1.4];
+function drawRadarView(rf) {
+  if (!radarViewOn) return;
+  const cvs = document.getElementById('radar-view-canvas');
+  const rctx = cvs.getContext('2d');
+  rctx.clearRect(0, 0, cvs.width, cvs.height);
+  rctx.fillStyle = C.bg; rctx.fillRect(0, 0, cvs.width, cvs.height);
+
+  const toPx = (x, y) => [
+    (x - RADAR_VIEW_X[0]) / (RADAR_VIEW_X[1] - RADAR_VIEW_X[0]) * cvs.width,
+    cvs.height - (y - RADAR_VIEW_Y[0]) / (RADAR_VIEW_Y[1] - RADAR_VIEW_Y[0]) * cvs.height,
+  ];
+
+  if (!rf || !rf.points || !rf.points.length) {
+    setText('radar-view-count', '데이터 없음');
+    return;
+  }
+
+  rctx.fillStyle = C.accent || '#7df';
+  rf.points.forEach(p => {
+    const [px, py] = toPx(p[0], p[1]);
+    rctx.beginPath(); rctx.arc(px, py, 2, 0, Math.PI * 2); rctx.fill();
+  });
+  rctx.strokeStyle = '#f59e0b'; rctx.lineWidth = 2;
+  (rf.cluster_centroids || []).forEach(c => {
+    const [px, py] = toPx(c[0], c[1]);
+    rctx.beginPath(); rctx.arc(px, py, 6, 0, Math.PI * 2); rctx.stroke();
+  });
+  setText('radar-view-count', `${rf.points.length} / ${rf.n_clusters || 0}`);
+}
 
 // ─────────────────────────────────────────────
 // 뷰 / 투영
@@ -1148,6 +1246,7 @@ function updateConfirmCard(s) {
 
 function updatePanel(s) {
   updateConfirmCard(s);
+  drawRadarView(s.radar_frame);
 
   const mins = Math.floor(s.elapsed_sec / 60), secs = Math.floor(s.elapsed_sec % 60);
   setText('s-time', `T + ${mins}분 ${String(secs).padStart(2, '0')}초`);
@@ -1606,6 +1705,8 @@ function connect() {
 }
 
 applyTheme();
+applyThermalView();
+applyRadarView();
 resize();
 connect();
 pollStatus();

@@ -9,10 +9,14 @@ QueueReceiver로 바뀌었을 뿐, 서보 각도 계산·dwell·선점·열화�
 KeyboardInterrupt를 자체적으로 잡는데, 백그라운드 스레드는 SIGINT를 못
 받으므로 재사용할 수 없다 — 대신 `run_forever()`가 시작 시 하던 일(홈
 포지션으로 1회 이동)만 그대로 재현하고, 직접 만든 stop_event 기반 루프에서
-`step()`을 반복 호출한다.
+`step()`을 반복 호출한다. `step()` 호출 직후 한 줄, 웹 시각화/rosbag
+기록용으로 현재 각도·dwell 상태를 `bus.servo_status_q`에 얹는다(dwell/
+추적 로직 자체는 건드리지 않는 부가 발행 — arda_bringup의
+`enable_radar_view`와 같은 원칙, radar_worker.py 참고).
 """
 
 import threading
+import time
 
 from arda_servo.controller import ServoController
 from arda_servo.servo import PanServo
@@ -86,5 +90,15 @@ def run(bus: Bus, stop_event: threading.Event, cfg: dict, simulate: bool) -> Non
     try:
         while not stop_event.is_set():
             controller.step()
+            # 웹 시각화/rosbag 기록용 상태 스냅샷 (선택적) — dwell/추적
+            # 로직 자체는 전혀 건드리지 않는 부가 발행.
+            now = time.time()
+            bus.servo_status_q.put({
+                "ts": now,
+                "angle": servo.angle,
+                "dwelling": now < controller._dwell_until,
+                "dwell_remaining_sec": max(0.0, controller._dwell_until - now),
+                "thermal_engaged": controller._thermal_engaged,
+            })
     finally:
         servo.close()

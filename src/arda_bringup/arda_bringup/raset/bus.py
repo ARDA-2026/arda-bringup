@@ -124,6 +124,20 @@ class Bus:
         self.trigger_q = BoundedQueue(maxsize=32)  # radar -> thermal (float ts)
         self.verdict_q = BoundedQueue(maxsize=32)  # thermal -> radar (ThermalVerdict)
         self.thermal_pan_q = LatestQueue()  # thermal -> servo (ThermalPan)
+        # radar -> 웹 시각화(선택적, arda_bringup의 enable_radar_view). 매
+        # 프레임 최신 포인트클라우드/클러스터 스냅샷만 유지하면 되므로
+        # LatestQueue를 쓴다 — raset 자체 로직(낙하 감지 등)은 이 큐를
+        # 전혀 읽지 않는다(arda_bringup 쪽에서만 소비, 부가 기능).
+        self.radar_frame_q = LatestQueue()
+        # servo -> 웹 시각화/rosbag 기록(선택적). 서보 각도·dwell 상태를
+        # 최신 값만 유지하면 되므로 역시 LatestQueue — raset 자체 로직은
+        # 이 큐를 읽지 않는다.
+        self.servo_status_q = LatestQueue()
+        # thermal -> 웹 시각화/rosbag 기록(선택적). 관찰 중 매 프레임의
+        # matched/consecutive/confirmed 판정 상태 — "사람 확정까지 얼마나
+        # 가까워졌는지"를 라이브로 볼 수 있게 한다. raset 자체 로직은
+        # 이 큐를 읽지 않는다.
+        self.thermal_status_q = LatestQueue()
         self.pending_location = LocationHolder()  # radar -> thermal (관찰 중인 낙하 위치)
         # thermal -> radar. 지금 진행 중인 관찰에서 열화상이 발열 영역을 한 번이라도
         # 검출했는지(=열원을 붙잡아 추적을 시작했는지) — arda_servo.controller.
