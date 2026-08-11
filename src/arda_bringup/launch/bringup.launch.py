@@ -120,15 +120,15 @@ def generate_launch_description():
                 'river_depth_m': 6.0,
             }],
         ),
-        Node(
-            package='arda_bringup',
-            executable='web_bridge_node',
-            name='web_bridge_node',
-            output='screen',
-            parameters=[{
-                # FastAPI 서버 바인드 주소 — 브라우저에서 http://<host>:<port> 로 접속
-                'web_server_host': '0.0.0.0',
-                'web_server_port': 8000,
-            }],
-        ),
+        # Node(
+        #     package='arda_bringup',
+        #     executable='web_bridge_node',
+        #     name='web_bridge_node',
+        #     output='screen',
+        #     parameters=[{
+        #         # FastAPI 서버 바인드 주소 — 브라우저에서 http://<host>:<port> 로 접속
+        #         'web_server_host': '0.0.0.0',
+        #         'web_server_port': 8000,
+        #     }],
+        # ),
     ])
