@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>arda_bringup</name>
+  <version>0.0.0</version>
+  <description>ARDA 시스템 ROS2 브링업 패키지 — 센서 추적, 표류 예측, 웹 관제 브리지</description>
+  <maintainer email="dlekqls3915@gmail.com">dabin</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>ament_index_python</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-shapely</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- rosdep 키가 없어 pip으로 따로 설치해야 하는 패키지 (add.md 참고):
+       fastapi, uvicorn[standard], pydantic
+       djitellopy — 실제 Tello 드론(dry_run=false)에 연결할 때만 필요.
+       dry_run(기본값) 모드는 djitellopy 없이도 정상 동작한다.
+
+       tracker_node가 raset_dir로 불러오는 arda-raset(및 그 형제 저장소
+       arda-radar/arda-servo/thermal-camera)의 자체 의존성 — pyserial,
+       scikit-learn, Jetson.GPIO, Adafruit-Blinka,
+       adafruit-circuitpython-mlx90640 등 — 은 이 package.xml에 선언하지
+       않는다. 전부 NVIDIA Jetson(aarch64) 하드웨어 보드 전용이라 이
+       패키지의 표준 개발 환경(x86 dev 서버)에는 설치되지 않고, 설치할
+       필요도 없다(raset_dir을 비워두면 tracker_node는 그냥 대기 상태로
+       남는다). 실제 로봇/Jetson에 배포할 때 각 저장소의 pyproject.toml을
+       참고해 그 보드의 Python 환경에 설치하세요. -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

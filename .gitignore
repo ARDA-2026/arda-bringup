@@ -1,0 +1,39 @@
+# ROS2 빌드 산출물
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+.eggs/
+
+# 환경
+.env
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 로그
+*.log
+*.bag
+*.db3
+
+# 설정 (민감 정보)
+config/secrets.yaml
+add.md
