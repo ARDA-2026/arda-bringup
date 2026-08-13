@@ -25,15 +25,18 @@ ROS2 노드로 감쌌다. `raset` 자체는 더 이상 외부 경로에 의존�
   레이더 단독 후보(열화상 미확인)는 발행하지 않는다 — arda-raset 자체가
   그렇게 설계돼 있다(열화상이 없으면 이 확정 이벤트 자체가 없고, raset은
   로그만 남긴다. `raset/radar_worker.py`의 `thermal_gate=False` 분기 참고).
-- `/arda/tracker/thermal_image` (sensor_msgs/Image): 열화상이 낙하 후보를
-  관찰(dwell)하는 동안의 프레임(검출 오버레이 포함). raset은 이 프레임을
-  기본적으로 `report_url`(HTTP, site 설정이 있을 때만) 또는
+- `/arda/tracker/thermal_image` (sensor_msgs/Image): 열화상 프레임 — 레이더
+  트리거 대기 중(원본 컬러맵)에도, 낙하 후보를 관찰(dwell)하는 동안(검출
+  오버레이 포함)에도 상시로 발행된다(raset의 always-on 스트리밍, `show`가
+  켜져 있으면 대기 상태에서도 매 프레임 읽어 표시/전송함). raset은 이
+  프레임을 기본적으로 `report_url`(HTTP, site 설정이 있을 때만) 또는
   `--show-thermal`(로컬 GUI 창, DISPLAY 필요할 때만)로만 내보내는데, 둘 다
   이 환경/구성에 의존적이라 여기서는 `show=True`로 항상 켜고 `cv2.imshow`를
   ROS 발행으로 갈아끼워서(raset 전체에서 이 함수가 쓰이는 곳은 그 한 줄
   뿐이라 안전하게 가로챌 수 있음) 창을 띄우는 대신 토픽으로 보낸다.
   `enable_thermal_view` 파라미터(기본 true)로 끄면 이 토픽만 발행을
-  건너뛴다 — detection_confirmed는 이 스위치와 무관하게 항상 발행됨.
+  건너뛴다(센서 읽기 자체는 계속함) — detection_confirmed는 이 스위치와
+  무관하게 항상 발행됨.
 - `/arda/tracker/radar_frame` (std_msgs/String, JSON): 레이더 포인트클라우드
   시각화 전용 스냅샷(`points`, `n_clusters`, `cluster_centroids`) — 5Hz로
   발행. `enable_radar_view` 파라미터(기본 true)로 끌 수 있다.
@@ -42,11 +45,11 @@ ROS2 노드로 감쌌다. `raset` 자체는 더 이상 외부 경로에 의존�
   `thermal_engaged`) — 5Hz로 항상 발행(on/off 스위치 없음, 오버헤드
   미미함). rosbag 기록으로 레이더/열화상/서보 타이밍을 함께 분석할 때 씀.
 - `/arda/tracker/thermal_status` (std_msgs/String, JSON): 열화상 판정
-  진행 상태(`frame_number`, `matched`, `consecutive`,
-  `required_consecutive`, `moving`, `confirmed`, `offset`,
+  진행 상태(`frame_number`, `matched`, `match_count`,
+  `required_matches`, `moving`, `confirmed`, `offset`,
   `give_up_remaining_sec`) — 관찰(dwell) 중에만 매 프레임 발행. "사람
-  확정까지 얼마나 가까워졌는지"(연속 매칭 프레임 수 등)를 dwell_seconds
-  튜닝하면서 바로 확인할 때 이 토픽을 본다.
+  확정까지 얼마나 가까워졌는지"(누적 매칭 횟수 등, 연속일 필요 없음)를
+  dwell_seconds 튜닝하면서 바로 확인할 때 이 토픽을 본다.
 
 arda-raset 자체를 손대지 않기 위해, bus 큐를 subclass하거나 대체하지 않고
 "콜백을 먼저 실행한 뒤 원본 큐에 그대로 전달"하는 극소 Tee 래퍼로 감싼다 —
@@ -59,7 +62,8 @@ raset의 세 워커 스레드는 원래 큐와 100% 동일하게 동작한다(ge
 똑같이 10.0이라 열화상이 실제 관찰을 마치기 *전에* 레이더가 먼저 포기해
 verdict가 유실되는 버그가 있었다(Jetson 실기 레이더+열화상으로 재현
 확인 — 아래 `_start_raset()`의 계산부 주석 참고). 이 노드는 명시적으로
-값을 주지 않으면 자동으로 `dwell_seconds + 30.0`을 써서 넉넉한 마진을
+값을 주지 않으면 자동으로 `dwell_seconds + dwell_margin_seconds`(기본
+30.0)를 써서 넉넉한 마진을
 보장한다(실측상 초과분이 give-up 경로에서 5~9.5초, 열원이 화면 가장자리
 에서 계속 "움직이는" 채로 오래 끄는 경로에서는 40초 이상까지 널뛰어
 15초 마진도 부족했음 — 완전한 상한 보장은 아니니 `/arda/tracker/
@@ -131,19 +135,56 @@ class TrackerNode(Node):
         self.declare_parameter('simulate_thermal', False)
         self.declare_parameter('no_radar', False)
         self.declare_parameter('yolo', False)
-        self.declare_parameter('model_path', '')          # 비우면 <thermal_dir>/models/t1_ver3.pt
+        self.declare_parameter('model_path', '')          # 비우면 <thermal_dir>/models/s_yolo26.pt
         self.declare_parameter('confidence_threshold', 0.4)
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('dwell_seconds', 10.0)
-        self.declare_parameter('required_consecutive', 3)
+        # 사람 확정에 필요한 누적 매칭 횟수 — 연속일 필요는 없다(중간에
+        # matched=False 프레임이 끼어도 카운트는 안 줄어듦). thermal_worker.py
+        # 참고.
+        self.declare_parameter('required_matches', 3)
         self.declare_parameter('settle_offset', 0.15)
-        # -1(기본) = 자동 계산: dwell_seconds + 5.0. 양수를 명시하면 그 값을
-        # 그대로 쓴다 — 반드시 dwell_seconds보다 커야 한다 (아래 _start_raset()
-        # 의 thermal_pending_timeout 계산부 주석 참고. 실측으로 확인된 버그:
-        # 이 값이 dwell_seconds와 같으면(예: 둘 다 10.0) 열화상이 실제
-        # 관찰을 마치기 *전에* 레이더가 먼저 포기해 verdict가 통째로
-        # 유실된다).
+        # thermal_pending_timeout과 servo_dwell_seconds가 자동(-1) 모드일 때
+        # 공통으로 쓰는 안전 마진(초) — "dwell_seconds + 이 값"을 상한으로
+        # 삼는다. 하나로 통일해둔 이유: 레이더(thermal_pending_timeout)와
+        # 서보(servo_dwell_seconds) 둘 다 "열화상이 dwell_seconds를 넘겨
+        # 실제로 얼마나 더 걸릴 수 있는가"라는 같은 불확실성(트리거 전파
+        # 지연 + give-up 카운트다운이 계속 리셋되는 unbounded 케이스, 아래
+        # thermal_pending_timeout 계산부 주석 참고)에 대한 여유이기 때문이다
+        # — 실기 테스트로 40초 이상 걸리는 경우도 있어 기본을 30.0으로 잡되,
+        # 환경에 따라 하나의 변수로 같이 조절할 수 있게 뺐다.
+        self.declare_parameter('dwell_margin_seconds', 30.0)
+        # -1(기본) = 자동 계산: dwell_seconds + dwell_margin_seconds. 양수를
+        # 명시하면 그 값을 그대로 쓴다 — 반드시 dwell_seconds보다 커야 한다
+        # (아래 _start_raset()의 thermal_pending_timeout 계산부 주석 참고.
+        # 실측으로 확인된 버그: 이 값이 dwell_seconds와 같으면(예: 둘 다
+        # 10.0) 열화상이 실제 관찰을 마치기 *전에* 레이더가 먼저 포기해
+        # verdict가 통째로 유실된다).
         self.declare_parameter('thermal_pending_timeout', -1.0)
+        # 서보가 dwell 중 마지막 조준 각도에서 얼마나 버틸지(초) — 열화상
+        # 트리거 후 관찰 시간(dwell_seconds, 위)과는 별개 값이다. 원래는
+        # <servo_dir>/config/settings.yaml의 servo.dwell_seconds로만 바꿀 수
+        # 있었는데, 여기서도 자유롭게 조정할 수 있도록 파라미터로 노출한다.
+        #
+        # -1(기본) = 자동 계산: max(yaml 값, dwell_seconds + dwell_margin_seconds).
+        # yaml 기본값(10.0)을 무조건 신뢰하지 않는 이유 — 서보의 dwell 연장은
+        # "이번 프레임에 뭔가라도(사람 모양이 아니어도) 검출됐을 때"만
+        # 일어나는데, 열화상이 몇 초간 아무것도 못 찾으면(아직 자기
+        # dwell_seconds=30초는 안 지났는데도) 서보가 자기 폴백 타이머
+        # (10초)로 먼저 포기해버리는 실측 버그가 있었다 — "매칭시도" 로그는
+        # grid_xy 유무와 무관하게 매 프레임 찍히므로, 로그가 계속 나온다고
+        # 서보가 보정을 받고 있다는 뜻은 아니다(thermal_pending_timeout과
+        # 같은 종류의 문제). 0 이상을 명시하면 그 값을 그대로 쓰되(사용자
+        # 의도 존중), dwell_seconds보다 작으면 경고만 남긴다.
+        #
+        # ⚠️ 또한 반드시 열화상 프레임 주기(FRAME_INTERVAL_S, 기본 0.5초)의
+        # 2배 이상이어야 한다 — arda_servo.controller.ServoController.step()이
+        # 열화상 보정(ThermalPan)을 받을 때마다 "지금부터 이 값만큼" dwell을
+        # 연장하는 방식이라(controller.py의 "추적 연장" 로그 참고), 이 값이
+        # 프레임 주기보다 짧으면 다음 보정이 오기 전에 dwell이 먼저 끝나
+        # 버린다(위 자동 계산이면 사실상 항상 만족됨). 아래 _start_raset()
+        # 에서 두 조건을 모두 검사해 위반 시 로그를 남긴다.
+        self.declare_parameter('servo_dwell_seconds', -1.0)
         self.declare_parameter('radar_cli_port', '/dev/ttyUSB0')
         self.declare_parameter('radar_data_port', '/dev/ttyUSB1')
         self.declare_parameter('radar_settings', '')      # 비우면 <radar_dir>/config/settings.yaml
@@ -187,7 +228,7 @@ class TrackerNode(Node):
         self._pub_servo_status = self.create_publisher(
             String, '/arda/tracker/servo_status', 10)
         # 열화상 판정 진행 상태(시각화/rosbag 기록 전용) — 매 프레임
-        # matched/consecutive/confirmed. "사람 확정까지 얼마나
+        # matched/match_count/confirmed. "사람 확정까지 얼마나
         # 가까워졌는지"를 dwell_seconds 튜닝하면서 바로 볼 수 있다.
         self._pub_thermal_status = self.create_publisher(
             String, '/arda/tracker/thermal_status', 10)
@@ -270,10 +311,61 @@ class TrackerNode(Node):
             Path(servo_config_param) if servo_config_param
             else servo_dir / 'config' / 'settings.yaml')
 
-        report_url = load_settings(radar_settings_path).get('site', {}).get('report_url', '')
+        site_cfg = load_settings(radar_settings_path).get('site', {})
+        report_url = site_cfg.get('report_url', '')
+        site_lat = site_cfg.get('lat')
+        site_lon = site_cfg.get('lon')
 
         with open(servo_config_path, encoding='utf-8') as f:
             servo_cfg = yaml.safe_load(f)
+
+        # servo_dwell_seconds 파라미터 처리 — 명시적으로 준 값(>=0)은 그대로
+        # 쓰되 dwell_seconds보다 작으면 경고만 남긴다(사용자 의도 존중,
+        # thermal_pending_timeout을 양수로 직접 줄 때와 같은 원칙). 자동(-1,
+        # 기본)이면 yaml 값을 무조건 신뢰하지 않고 dwell_seconds+30.0과
+        # 비교해 더 큰 쪽을 쓴다 — 그러지 않으면 yaml 기본값(10.0)이
+        # dwell_seconds(예: 30.0)보다 작아서, 열화상이 프레임마다 아무것도
+        # (사람 모양이 아닌 것조차) 못 찾는 구간이 10초만 지속돼도 서보
+        # 자신의 폴백 타이머가 먼저 만료돼버린다 — 열화상은 아직 30초까지
+        # 여유가 있는데 서보가 먼저 각도를 고정하고 트리거 대기로 돌아가서
+        # "매칭시도 로그는 계속 찍히는데 서보는 dwell 초과로 끝남" 현상이
+        # 실측됨(서보 dwell 연장은 grid_xy가 있는 프레임에서만 일어나고,
+        # 매칭시도 로그는 grid_xy 유무와 무관하게 매 프레임 찍히므로 로그가
+        # 계속 나온다고 서보가 보정을 받고 있다는 뜻은 아니다). 이 폴백
+        # 타이머는 thermal_worker가 give_up/confirmed를 명시적으로 보내면
+        # (controller.py의 _end_tracking) dwell 만료를 기다리지 않고 즉시
+        # 끝나므로, 넉넉하게 잡아도 정상 종료가 늦어지지는 않는다.
+        dwell_seconds_for_servo = float(self.get_parameter('dwell_seconds').value)
+        dwell_margin_seconds = float(self.get_parameter('dwell_margin_seconds').value)
+        servo_dwell_seconds_param = float(self.get_parameter('servo_dwell_seconds').value)
+        yaml_servo_dwell_seconds = servo_cfg.get('servo', {}).get('dwell_seconds', 10.0)
+        if servo_dwell_seconds_param >= 0.0:
+            effective_servo_dwell_seconds = servo_dwell_seconds_param
+            if effective_servo_dwell_seconds < dwell_seconds_for_servo:
+                self.get_logger().warning(
+                    f'servo_dwell_seconds({effective_servo_dwell_seconds}s)가 dwell_seconds'
+                    f'({dwell_seconds_for_servo}s)보다 작습니다 — 열화상이 아직 관찰 중인데 '
+                    f'서보가 먼저 포기하고 각도를 고정할 수 있습니다.')
+        else:
+            effective_servo_dwell_seconds = max(yaml_servo_dwell_seconds, dwell_seconds_for_servo + dwell_margin_seconds)
+        servo_cfg.setdefault('servo', {})['dwell_seconds'] = effective_servo_dwell_seconds
+
+        # 추가로, 열화상 프레임 주기(FRAME_INTERVAL_S)보다도 충분히(2배 이상)
+        # 커야 한다 — grid_xy가 매 프레임 검출되는 정상 상황에서도 "추적
+        # 연장"이 다음 보정 도착 전에 만료되지 않게 하기 위함. 위 자동 계산
+        # (dwell_seconds+30.0)이면 사실상 항상 만족되지만, 명시적으로 아주
+        # 작은 값을 준 경우를 대비해 별도로 검사한다.
+        frame_interval_s = getattr(thermal_backend, 'FRAME_INTERVAL_S', 0.5)
+        if effective_servo_dwell_seconds <= frame_interval_s:
+            self.get_logger().error(
+                f'servo_dwell_seconds({effective_servo_dwell_seconds}s)가 열화상 프레임 주기'
+                f'({frame_interval_s}s) 이하입니다 — 서보가 열화상 관찰 도중에 dwell이 끝나'
+                f'추적을 멈출 수 있습니다. servo_dwell_seconds를 늘리세요.')
+        elif effective_servo_dwell_seconds < frame_interval_s * 2:
+            self.get_logger().warning(
+                f'servo_dwell_seconds({effective_servo_dwell_seconds}s)가 열화상 프레임 주기'
+                f'({frame_interval_s}s)의 2배보다 작습니다 — 프레임 지연이 조금만 있어도 '
+                f'추적 연장이 늦어 dwell이 만료될 수 있습니다.')
 
         bus = Bus()
         self._bus = bus  # _on_radar_view_timer()가 radar_frame_q를 읽는 데 씀
@@ -297,7 +389,7 @@ class TrackerNode(Node):
         device = self.get_parameter('device').value
         confidence_threshold = float(self.get_parameter('confidence_threshold').value)
         dwell_seconds = float(self.get_parameter('dwell_seconds').value)
-        required_consecutive = int(self.get_parameter('required_consecutive').value)
+        required_matches = int(self.get_parameter('required_matches').value)
         settle_offset = float(self.get_parameter('settle_offset').value)
 
         # thermal_pending_timeout: radar_worker(raset/radar_worker.py 146~169행)가
@@ -319,7 +411,7 @@ class TrackerNode(Node):
         # 계속 "움직이는" 상태로 오래 머무는 경우(=give-up 카운트다운이
         # 계속 리셋되는 경우)는 confirmed=true까지 40초 이상 걸리는 것도
         # 실측됨(15초 마진으로는 부족해서 재발 — thermal_status 토픽의
-        # frame_number/consecutive로 실측 확인). 그래서 여유를 15초가
+        # frame_number/match_count로 실측 확인). 그래서 여유를 15초가
         # 아니라 30초로 더 크게 잡는다. 이래도 열원이 병적으로 계속
         # 흔들리며 settle_offset 안으로 절대 안 들어오면 이론적으로는
         # 여전히 timeout이 먼저 올 수 있다(위 unbounded 특성 때문 —
@@ -330,7 +422,7 @@ class TrackerNode(Node):
         thermal_pending_timeout_param = float(self.get_parameter('thermal_pending_timeout').value)
         thermal_pending_timeout = (
             thermal_pending_timeout_param if thermal_pending_timeout_param > 0.0
-            else dwell_seconds + 30.0
+            else dwell_seconds + dwell_margin_seconds
         )
         radar_cli_port = self.get_parameter('radar_cli_port').value
         radar_data_port = self.get_parameter('radar_data_port').value
@@ -360,7 +452,7 @@ class TrackerNode(Node):
         else:
             try:
                 if use_yolo:
-                    model_path = model_path_param or str(thermal_dir / 'models' / 't1_ver3.pt')
+                    model_path = model_path_param or str(thermal_dir / 'models' / 's_yolo26.pt')
                     backend = thermal_backend.YoloBackend(model_path, device, confidence_threshold)
                 else:
                     backend = thermal_backend.ThresholdBackend()
@@ -371,8 +463,9 @@ class TrackerNode(Node):
             else:
                 _spawn(
                     'thermal', thermal_worker.run, bus, self._stop_event, backend, read_frame_fn, i2c,
-                    dwell_seconds, required_consecutive, settle_offset, report_url,
+                    dwell_seconds, required_matches, settle_offset, report_url,
                     True,  # show=True — 위에서 cv2.imshow를 ROS 발행으로 갈아끼웠으므로 항상 켠다
+                    site_lat, site_lon,
                 )
                 thermal_started = True
 

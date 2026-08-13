@@ -2,20 +2,29 @@
 
 thermal_main.py / thermal_main_yolo.py의 run_observation() 상태기계(대기
 트리거 폴링 → 프레임 읽기 → 판정 → 서보 추적보정 전송 → settle 여부로
-give-up 카운트다운 시작/보류 → 연속매칭 카운트 → 확정/포기 → 회신)를 그대로
+give-up 카운트다운 시작/보류 → 누적매칭 카운트 → 확정/포기 → 회신)를 그대로
 이식하되, UDP 대신 bus 큐를 쓴다.
 
-기본적으로 cv2.imshow(GUI 창)는 안 쓴다 — 대신 관찰(dwell) 중인 동안 매
-프레임(~0.5초 간격) 기존 lat/lon/timestamp 리포트 포맷
-(`arda.utils.send_fall_report`)에 열화상 이미지를 얹어 반복 전송해 실시간
-스트리밍한다. 관찰 중이 아닐 때(대기 상태)는 보낼 위치 컨텍스트가 없으므로
-아무것도 보내지 않는다.
+로컬 표시(show)와 웹 스트리밍(report_url)은 레이더 트리거를 기다리는
+대기 상태에서도 상시로 이뤄진다 — 매 프레임(~0.5초 간격) 계속 읽어
+표시/전송한다. 단, **판정(detect/draw)은 트리거가 와서 관찰(dwell) 중일
+때만** 돌린다 — 대기 중에는 원본 컬러맵 이미지 그대로만 표시/전송한다
+(오버레이 없음, 항상 confirmed=False). 아무도 안 지켜보는데 YOLO 등
+무거운 판정을 상시로 돌리는 낭비를 막기 위함이다.
 
-`show=True`(main.py의 --show-thermal)면 관찰 중인 동안 로컬 디스플레이에도
-컬러맵 창을 띄운다 — report_url 웹 스트리밍과 별개로, DISPLAY가 붙어있는
-환경에서 바로 눈으로 확인하고 싶을 때 쓴다.
+웹으로 보낼 때 실어야 하는 위치도 상태에 따라 다르다: 관찰 중에는 그
+낙하의 실제 lat/lon(`bus.pending_location`)을, 대기 중에는 보낼 낙하
+위치가 없으므로 설치 지점 좌표(site_lat/site_lon, `arda-radar`의
+config/settings.yaml `site.lat/lon`)를 대신 싣는다. 이미지와 좌표를 별도
+요청으로 쪼개지 않고, 기존 lat/lon/timestamp 리포트 포맷
+(`arda.utils.send_fall_report`)에 이미지+confirmed를 얹어 한 번에
+보낸다 — 요청을 둘로 쪼개는 것보다 가볍고 프로토콜도 그대로다.
 
-매 프레임 판정 결과(matched/consecutive/confirmed 등, 기존 debug 로그와
+`show=True`(main.py의 --show-thermal)면 대기/관찰 상태와 무관하게 항상
+로컬 디스플레이에 컬러맵 창을 띄운다 — report_url 웹 스트리밍과 별개로,
+DISPLAY가 붙어있는 환경에서 바로 눈으로 확인하고 싶을 때 쓴다.
+
+매 프레임 판정 결과(matched/match_count/confirmed 등, 기존 info 로그와
 동일한 값)를 `bus.thermal_status_q`에도 얹는다(웹 시각화/rosbag 기록
 전용 — 판정 로직 자체는 안 건드림, arda_bringup의 `radar_frame_q`/
 `servo_status_q`와 같은 원칙).
@@ -36,7 +45,7 @@ logger = get_logger(__name__)
 JPEG_QUALITY = 85
 TRIGGER_POLL_S = 0.2  # 트리거 대기 중 stop_event 확인 주기
 PREEMPT_POLL_S = 0.02  # 관찰 중 "더 높은 확률의 새 트리거" 확인 주기
-WINDOW_NAME = "ARDA Thermal — 관찰 중"
+WINDOW_NAME = "ARDA Thermal"
 
 
 def run(
@@ -46,16 +55,21 @@ def run(
     read_frame_fn,
     i2c,
     dwell_seconds: float,
-    required_consecutive: int,
+    required_matches: int,
     settle_offset: float,
     report_url: str,
     show: bool = False,
+    site_lat: float | None = None,
+    site_lon: float | None = None,
 ) -> None:
     """센서 초기화(`thermal_backend.initialize_sensor`)는 main.py가 스레드를
     띄우기 *전에* 미리 해둔다 — 실패 시(하드웨어 없음) 스레드 자체를 안
     띄우려면 main.py가 먼저 결과를 알아야 하고, I2C를 두 번 초기화하지
     않기 위해서이기도 하다(레이더의 /dev/ttyUSB* 존재 여부 사전 체크와
-    같은 패턴)."""
+    같은 패턴).
+
+    site_lat/site_lon은 대기 상태(관찰 중이 아닐 때) 웹 스트리밍에 실을
+    위치 — 낙하 위치가 아직 없으므로 설치 지점 좌표를 대신 쓴다."""
     try:
         logger.info("열화상 센서 안정화 %d프레임 대기 중...", tb.SENSOR_WARMUP_FRAMES)
         for _ in range(tb.SENSOR_WARMUP_FRAMES):
@@ -64,15 +78,16 @@ def run(
             tb.read_frame(read_frame_fn)
             time.sleep(tb.FRAME_INTERVAL_S)
 
-        logger.info("열화상 대기 중 — 레이더 트리거를 기다립니다")
-        trigger_ts = _wait_for_trigger(bus, stop_event)
+        logger.info("열화상 대기 중 — 레이더 트리거를 기다리며 상시 표시/스트리밍 중")
+        trigger_ts = _wait_for_trigger(bus, stop_event, read_frame_fn, report_url, show, site_lat, site_lon)
         while trigger_ts is not None:
             latency_ms = (time.time() - trigger_ts) * 1000
             logger.info("열화상 트리거 수신(전송 후 %.0fms) — 최대 %.1fs 관찰 시작", latency_ms, dwell_seconds)
 
             person, next_trigger_ts = _run_observation(
                 bus, stop_event, backend, read_frame_fn,
-                dwell_seconds, required_consecutive, settle_offset, report_url, show,
+                dwell_seconds, required_matches, settle_offset, report_url, show,
+                site_lat, site_lon,
             )
 
             if stop_event.is_set():
@@ -83,11 +98,9 @@ def run(
                 trigger_ts = next_trigger_ts
                 continue
 
-            logger.info("=" * 60)
             logger.info("열화상 판정 완료 — person=%s", person)
-            logger.info("=" * 60)
             bus.verdict_q.put(ThermalVerdict(person=person, ts=time.time()))
-            trigger_ts = _wait_for_trigger(bus, stop_event)
+            trigger_ts = _wait_for_trigger(bus, stop_event, read_frame_fn, report_url, show, site_lat, site_lon)
     finally:
         if show:
             cv2.destroyAllWindows()
@@ -97,13 +110,86 @@ def run(
     logger.info("열화상 종료")
 
 
-def _wait_for_trigger(bus: Bus, stop_event: threading.Event) -> float | None:
-    """새 트리거 1건을 받을 때까지 짧은 타임아웃으로 반복 폴링. stop_event가
-    켜지면 None을 반환해 상위 루프가 빠져나가게 한다."""
+def _publish_frame(
+    backend: tb.Backend,
+    color_image,
+    detection: tb.Detection,
+    confirmed: bool,
+    report_url: str,
+    lat: float | None,
+    lon: float | None,
+    show: bool,
+) -> None:
+    """판정 결과를 오버레이해 로컬 창(show)과 웹 스트리밍(report_url)에 반영.
+    관찰(observation) 중에만 쓴다 — 대기 중(판정 없음)은 `_publish_idle_frame`.
+
+    lat/lon이 없으면(웹 URL이 있어도) 전송하지 않는다."""
+    streaming = bool(report_url) and lat is not None and lon is not None
+    if not streaming and not show:
+        return
+
+    backend.draw(color_image, detection, confirmed)
+    if streaming:
+        ok, buf = cv2.imencode(".jpg", color_image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if ok:
+            send_fall_report(report_url, lat, lon, image_jpeg=buf.tobytes(), confirmed=confirmed)
+    if show:
+        cv2.imshow(WINDOW_NAME, color_image)
+        cv2.waitKey(1)
+
+
+def _publish_idle_frame(
+    color_image,
+    report_url: str,
+    lat: float | None,
+    lon: float | None,
+    show: bool,
+) -> None:
+    """대기(트리거 없음) 중 — 판정(detect/draw)을 돌리지 않고 원본 컬러맵
+    이미지 그대로만 로컬 창/웹에 반영한다(confirmed는 항상 False, 이미지+
+    좌표를 한 요청에 얹어 보내는 기존 리포트 포맷 그대로).
+
+    lat/lon이 없으면(웹 URL이 있어도) 전송하지 않는다."""
+    streaming = bool(report_url) and lat is not None and lon is not None
+    if not streaming and not show:
+        return
+
+    if streaming:
+        ok, buf = cv2.imencode(".jpg", color_image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if ok:
+            send_fall_report(report_url, lat, lon, image_jpeg=buf.tobytes(), confirmed=False)
+    if show:
+        cv2.imshow(WINDOW_NAME, color_image)
+        cv2.waitKey(1)
+
+
+def _wait_for_trigger(
+    bus: Bus,
+    stop_event: threading.Event,
+    read_frame_fn,
+    report_url: str,
+    show: bool,
+    site_lat: float | None,
+    site_lon: float | None,
+) -> float | None:
+    """새 트리거 1건을 받을 때까지 짧은 타임아웃으로 반복 폴링하되, show나
+    report_url이 켜져 있으면 대기 중에도 매 프레임 읽어(판정 없이) 원본
+    이미지를 로컬 표시/웹 스트리밍한다(위치는 설치 지점 좌표로 대체). 둘 다
+    꺼져 있으면(기존 동작 그대로) 센서를 건드리지 않고 트리거만 기다린다.
+    stop_event가 켜지면 None을 반환해 상위 루프가 빠져나가게 한다."""
+    idle_publish = bool(show or report_url)
     while not stop_event.is_set():
         ts = bus.trigger_q.get(timeout=TRIGGER_POLL_S)
         if ts is not None:
             return ts
+        if not idle_publish:
+            continue
+
+        thermal = tb.read_frame(read_frame_fn)
+        if thermal is None:
+            continue
+        color_image = tb.create_absolute_colormap(thermal)
+        _publish_idle_frame(color_image, report_url, site_lat, site_lon, show)
     return None
 
 
@@ -113,23 +199,30 @@ def _run_observation(
     backend: tb.Backend,
     read_frame_fn,
     dwell_seconds: float,
-    required_consecutive: int,
+    required_matches: int,
     settle_offset: float,
     report_url: str,
     show: bool = False,
+    site_lat: float | None = None,
+    site_lon: float | None = None,
 ) -> tuple[bool | None, float | None]:
-    """사람 모양 발열 영역이 required_consecutive 프레임 연속으로 잡히면
-    (True, None)을, dwell_seconds 동안 못 잡으면(포기) (False, None)을 반환.
+    """사람 모양 발열 영역이 이번 관찰(dwell) 동안 누적으로 required_matches
+    번 잡히면(연속일 필요 없음) (True, None)을, dwell_seconds 동안 그만큼
+    못 채우면(포기) (False, None)을 반환.
 
     더 높은 확률의 새 트리거가 오면 원칙적으로 (None, 새 트리거 ts)를 반환해
     호출부가 판정 없이 그 트리거로 즉시 재관찰을 시작하게 한다 — 단, 이번
-    관찰에서 이미 발열 영역을 한 번이라도 검출했다면(bus.thermal_engaged)
-    새 트리거를 무시하고 지금 추적을 계속한다. 레이더 좌표는 대략적인 초기
-    조준일 뿐이고, 열화상이 실제 열원을 붙잡은 순간부터는 열화상이 우선권을
-    갖는다는 원칙(arda_servo.ServoController._thermal_engaged와 동일)을
-    여기서도 지켜야, 서보가 실제로 보고 있는 지점과 열화상이 판정하는
+    관찰에서 원하는 모양과 이미 한 번이라도 매칭됐다면(bus.thermal_engaged,
+    즉 detection.matched=True가 처음 나온 시점부터 — required_matches
+    중 1/N째) 새 트리거를 무시하고 지금 추적을 계속한다. 단순히 배경보다
+    뜨거운 영역이 있다는 것만으로는(detection.grid_xy is not None이지만
+    matched=False) engaged로 치지 않는다 — 사람 모양이 아닌 열원(반사광,
+    손 등)에 선점권을 뺏기지 않기 위함이다. 레이더 좌표는 대략적인 초기
+    조준일 뿐이고, 열화상이 원하는 모양과 매칭되기 시작한 순간부터는
+    열화상이 우선권을 갖는다는 원칙(arda_servo.ServoController._thermal_engaged와
+    동일)을 여기서도 지켜야, 서보가 실제로 보고 있는 지점과 열화상이 판정하는
     지점이 어긋나지 않는다."""
-    consecutive = 0
+    match_count = 0
     frame_number = 0
     give_up_deadline: float | None = None
     bus.thermal_engaged.clear()
@@ -138,9 +231,9 @@ def _run_observation(
         new_trigger_ts = bus.trigger_q.get(timeout=PREEMPT_POLL_S)
         if new_trigger_ts is not None:
             if bus.thermal_engaged.is_set():
-                logger.info("[무시됨] 더 높은 확률의 낙하 후보 트리거 수신 — 이미 열원을 추적 중이라 무시하고 계속 관찰")
+                logger.info("[제어권 유지] 더 높은 확률의 낙하 후보 트리거 수신 — 이미 매칭된 대상을 추적 중이라 무시하고 계속 관찰")
             else:
-                logger.info("[대체됨] 더 높은 확률의 낙하 후보 트리거 수신 — 현재 관찰을 중단하고 즉시 재시작")
+                logger.info("[제어권 이동] 더 높은 확률의 낙하 후보 트리거 수신 — 현재 관찰을 중단하고 즉시 재시작")
                 return None, new_trigger_ts
 
         thermal = tb.read_frame(read_frame_fn)
@@ -150,7 +243,9 @@ def _run_observation(
 
         color_image = tb.create_absolute_colormap(thermal)
         detection = backend.detect(thermal, color_image)
-        if detection.grid_xy is not None:
+        if detection.matched:
+            # 원하는 모양과 "처음" 매칭된 순간(=match_count가 1이 되는 시점)부터
+            # 제어권을 넘긴다 — 그냥 열이 감지된 것만으로는(grid_xy) 넘기지 않는다.
             bus.thermal_engaged.set()
 
         offset = None
@@ -160,7 +255,13 @@ def _run_observation(
             gx, gy = detection.grid_xy
             offset = tb.offset_from_circle_x(gx)
             vertical_offset = tb.offset_from_circle_y(gy)
-            bus.thermal_pan_q.put(ThermalPan(offset=offset, ts=time.time(), vertical_offset=vertical_offset))
+            # matched를 함께 실어 보낸다 — arda_servo.ServoController도 이
+            # 프레임이 원하는 모양과 매칭됐을 때만(_thermal_engaged) 서보
+            # 제어권을 넘겨받도록 raset/thermal_worker.py와 동일한 기준을 쓴다.
+            bus.thermal_pan_q.put(ThermalPan(
+                offset=offset, ts=time.time(), vertical_offset=vertical_offset,
+                matched=detection.matched,
+            ))
             moving = abs(offset) > settle_offset
 
         if moving:
@@ -169,27 +270,25 @@ def _run_observation(
             give_up_deadline = time.monotonic() + dwell_seconds
 
         if detection.matched:
-            consecutive += 1
-        elif not moving:
-            consecutive = 0
+            match_count += 1
 
-        confirmed = detection.matched and consecutive >= required_consecutive
+        confirmed = detection.matched and match_count >= required_matches
 
-        logger.debug(
-            "[관찰 %d] matched=%s consecutive=%d/%d moving=%s confirmed=%s",
-            frame_number, detection.matched, consecutive, required_consecutive, moving, confirmed,
+        logger.info(
+            "[열화상 매칭시도 %d] matched=%s (%d/%d) confirmed=%s",
+            frame_number, detection.matched, match_count, required_matches, confirmed,
         )
 
-        # 웹 시각화/rosbag 기록용 상태 스냅샷 (선택적) — 위 debug 로그와
-        # 정확히 같은 값이다. 판정 로직 자체는 전혀 건드리지 않는 부가
-        # 발행 — "사람 확정까지 얼마나 가까워졌는지"(연속 매칭 프레임 수)를
-        # 기본 로그 레벨(INFO)에서도, ROS 토픽으로도 볼 수 있게 한다.
+        # 웹 시각화/rosbag 기록용 상태 스냅샷 (선택적) — 위 info 로그와
+        # 정확히 같은 값이다(moving만 추가). 판정 로직 자체는 전혀 건드리지
+        # 않는 부가 발행 — "사람 확정까지 얼마나 가까워졌는지"(누적 매칭
+        # 횟수)를 ROS 토픽으로도 볼 수 있게 한다.
         bus.thermal_status_q.put({
             "ts": time.time(),
             "frame_number": frame_number,
             "matched": bool(detection.matched),
-            "consecutive": consecutive,
-            "required_consecutive": required_consecutive,
+            "match_count": match_count,
+            "required_matches": required_matches,
             "moving": moving,
             "confirmed": confirmed,
             "offset": offset,
@@ -203,19 +302,13 @@ def _run_observation(
         })
 
         # 실시간 스트리밍 — 관찰(dwell) 중인 동안 매 프레임 기존 lat/lon/time
-        # 리포트 포맷에 이미지를 얹어 반복 전송한다(사용자 지시). 관찰 중이
-        # 아니면(pending_location 없음) 보낼 위치 컨텍스트가 없어 전송 안 함.
+        # 리포트 포맷에 이미지를 얹어 반복 전송한다. 보통 pending_location에
+        # 이번 낙하의 실제 위치가 있지만(radar_worker가 트리거 직전에 set),
+        # 혹시 없는 경우에도(레이스 등) 상시 스트리밍이 끊기지 않도록 설치
+        # 지점 좌표로 대체한다.
         loc = bus.pending_location.get()
-        streaming = loc is not None and report_url
-        if streaming or show:
-            backend.draw(color_image, detection, confirmed)
-        if streaming:
-            ok, buf = cv2.imencode(".jpg", color_image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-            if ok:
-                send_fall_report(report_url, loc.lat, loc.lon, image_jpeg=buf.tobytes(), confirmed=confirmed)
-        if show:
-            cv2.imshow(WINDOW_NAME, color_image)
-            cv2.waitKey(1)
+        lat, lon = (loc.lat, loc.lon) if loc is not None else (site_lat, site_lon)
+        _publish_frame(backend, color_image, detection, confirmed, report_url, lat, lon, show)
 
         if confirmed:
             bus.thermal_pan_q.put(ThermalPan(

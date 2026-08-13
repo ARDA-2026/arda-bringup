@@ -1,11 +1,21 @@
-# 센서(tracker_node, raset을 스레드로 구동) + 알고리즘(drift_node, 표류
-# 예측/드론 미션) + 웹 브릿지(web_bridge_node, FastAPI+드론 제어)를 노드
-# 3개로 묶은 단일 통합 런치 파일 — 세 패키지를 따로 실행할 필요 없이
+# tracker_node(raset을 스레드로 구동해 레이더/서보/열화상 융합·낙하 확정)만
+# 띄우는 런치 파일. drift_node(표류 예측)와 web_bridge_node(FastAPI 웹+드론
+# 제어)는 아래에서 주석 처리돼 있다 — 표류 예측 연산과 웹/드론 호스팅을
+# Jetson이 아니라 노트북(arda-algo_general, drone_control 브랜치)이 맡는
+# 구조로 바꿨기 때문이다. Jetson은 ROS(tracker_node/raset)로 낙하를
+# 확정하기만 하고, 그 좌표(+열화상 이미지)를 기존 report_url 메커니즘
+# (arda-radar/arda/utils/web_report.py의 send_fall_report(), radar_worker.py/
+# thermal_worker.py가 이미 호출하던 것 그대로)으로 노트북에 넘긴다 —
+# site.report_url을 노트북의 POST /report로 맞춰두면 된다. 노트북 쪽
+# python hanriver.py가 받아서 표류 시뮬레이션을 시작하고, 웹 UI·드론 제어도
+# 그 프로세스가 담당한다. 예전처럼 Jetson에서 전부 다 하고 싶으면 아래
+# 두 Node를 주석 해제하면 된다.
+#
 # `ros2 launch arda_bringup bringup.launch.py`(또는 워크스페이스 루트의
-# `./run.sh`) 한 번으로 전부 뜬다. 빌드도 colcon 한 번(README "🚀 빠른
-# 시작" 참고)이면 되고, arda-radar/arda-servo/thermal-camera 세 저장소는
-# 코드를 따로 실행하는 게 아니라 tracker_node가 sys.path로 라이브러리처럼
-# import만 한다(radar_dir/servo_dir/thermal_dir 파라미터로 경로만 알려줌).
+# `./run.sh`) 한 번으로 뜬다. 빌드도 colcon 한 번(README "🚀 빠른 시작"
+# 참고)이면 되고, arda-radar/arda-servo/thermal-camera 세 저장소는 코드를
+# 따로 실행하는 게 아니라 tracker_node가 sys.path로 라이브러리처럼 import만
+# 한다(radar_dir/servo_dir/thermal_dir 파라미터로 경로만 알려줌).
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
@@ -49,19 +59,39 @@ def generate_launch_description():
                 # 10초는 너무 짧다 — 30초로 늘려서 여유를 준다. 다 튜닝되면
                 # 운영 환경에선 다시 줄여도 된다(응답성 vs 테스트 편의 트레이드오프).
                 'dwell_seconds': 30.0,
-                'required_consecutive': 3,
+                # 사람 확정에 필요한 누적 매칭 횟수 — 연속일 필요 없음
+                # (tracker_node.py의 required_matches 파라미터 선언부 주석 참고).
+                'required_matches': 3,
                 'settle_offset': 0.15,
-                # -1 = 자동으로 dwell_seconds + 30.0 사용 (tracker_node.py
-                # _start_raset() 참고). 이 값이 dwell_seconds보다 여유
-                # 있게 크지 않으면 레이더가 열화상 판정을 먼저 포기해버려
-                # 낙하 확정이 drift_node로 전달 안 되는 버그가 있었음(실측
-                # 확인 — 열원이 화면 가장자리에서 계속 "움직이는" 채로
-                # 오래 끄는 경우 40초 넘게 걸리는 것도 실측됨, 완전한 상한
-                # 보장은 아니니 필요하면 더 늘릴 것) — 반드시 dwell_seconds
-                # 보다 충분히 크게 명시하거나 -1(자동)로 둘 것.
-                # dwell_seconds를 늘리면 이 값도 자동으로 같이 늘어난다
-                # (지금 20+30=50초).
+                # thermal_pending_timeout과 servo_dwell_seconds가 자동(-1)
+                # 모드일 때 공통으로 쓰는 안전 마진(초) — 열화상이
+                # dwell_seconds를 넘겨 실제로 얼마나 더 걸릴 수 있는지에
+                # 대한 여유(tracker_node.py의 파라미터 선언부 주석 참고).
+                # 하나로 통일해뒀으니 필요하면 이 값 하나만 조절하면 된다.
+                'dwell_margin_seconds': 2.0,
+                # -1 = 자동으로 dwell_seconds + dwell_margin_seconds 사용
+                # (tracker_node.py _start_raset() 참고). 이 값이 dwell_seconds
+                # 보다 여유 있게 크지 않으면 레이더가 열화상 판정을 먼저
+                # 포기해버려 낙하 확정이 유실되는 버그가 있었음(실측 확인 —
+                # 열원이 화면 가장자리에서 계속 "움직이는" 채로 오래 끄는
+                # 경우 40초 넘게 걸리는 것도 실측됨, 완전한 상한 보장은
+                # 아니니 필요하면 dwell_margin_seconds를 늘릴 것) — 반드시
+                # dwell_seconds보다 충분히 크게 명시하거나 -1(자동)로 둘 것.
+                # dwell_seconds나 dwell_margin_seconds를 늘리면 이 값도
+                # 자동으로 같이 늘어난다(지금 30+30=60초).
                 'thermal_pending_timeout': -1.0,
+                # 서보가 dwell 중 마지막 조준 각도에서 버티는 시간(초) —
+                # 원래 arda-servo/config/settings.yaml의 servo.dwell_seconds로만
+                # 바꿀 수 있었는데 여기서 직접 조정할 수 있도록 노출했다.
+                # -1(기본) = max(yaml 값, dwell_seconds+dwell_margin_seconds)
+                # 자동 계산(지금 30+30=60초) — yaml 기본값(10.0)을 그대로
+                # 두면 dwell_seconds(위, 30.0)보다 작아서 서보가 열화상보다
+                # 먼저 포기해버리는 버그가 있었다(tracker_node.py의
+                # servo_dwell_seconds 파라미터 선언부 주석 참고). 0 이상을
+                # 명시하면 그 값을 그대로 쓰되 dwell_seconds보다 작으면
+                # 경고가 남는다. 어느 쪽이든 열화상 프레임 주기(기본 0.5초)
+                # 의 2배 이상이어야 하며, 위반 시 로그에 경고/에러가 남는다.
+                'servo_dwell_seconds': -1.0,
                 'radar_cli_port': '/dev/ttyUSB0',
                 'radar_data_port': '/dev/ttyUSB1',
 
@@ -77,58 +107,65 @@ def generate_launch_description():
                 'show_thermal': False,
             }],
         ),
-        Node(
-            package='arda_bringup',
-            executable='drift_node',
-            name='drift_node',
-            output='screen',
-            parameters=[{
-                'num_particles': 200,
-                'turbulence': 0.3,
-                'diffusivity_m': 2.0,
-                'dt': 0.1,
-                # 1 스텝 tick당 시뮬레이션 스텝 수 (배속). 드론 실기 연동에는 1을
-                # 쓴다 — 60이면 약 90배속이라 드론이 이륙하기도 전에 파티클이
-                # 지도를 벗어난다. 드론 없이 빠르게 보고 싶으면 값을 올리면 된다.
-                'playback_speed': 1,
-                'step_period_sec': 0.1,
-
-                # ── 실물 축소 지도 (드론 미션 좌표 변환의 기준) ──
-                'map_scale': 150.0,        # 축척 1:150
-                'map_print_w_m': 3.0,      # 실물 지도 가로(m)
-                'map_print_h_m': 2.0,      # 실물 지도 세로(m)
-                'map_east_m': 50.0,        # 입수 지점에서 동쪽 여유(실제 m)
-                'grid_cell_m': 15.0,
-                'hist_half_life_sec': 20.0,
-                'nms_max_count': 10,
-                'takeoff_margin_map_m': 0.30,  # 드론 이륙 지점: 지도 밖 여유(실물 m)
-
-                # ════════════════════════════════════════════════════════
-                # 유속 설정 — arda-algo_general/hanriver.py 와 동일한 전환 방식
-                # (자세한 설명은 drift_node.py 상단 주석 참고)
-                # ════════════════════════════════════════════════════════
-                # [기본] 고정 유속 — API 키 없이 바로 실행 가능. 값만 바꿔서 사용:
-                'velocity_x': -1.5,   # m/s, 서쪽 방향 (한강 평균)
-                'velocity_y': 0.05,   # m/s, 남쪽 방향
-
-                # [전환] 실시간 HRFCO API 유속을 쓰려면 아래 두 줄을 채우고
-                #        use_hrfco_api 를 True 로 바꾸세요:
-                'use_hrfco_api': False,
-                'hrfco_api_key': '',       # ← 여기에 HRFCO API 키 입력 (발급: hrfco.go.kr/web/openapiPage/openApi.do)
-                'hrfco_obs_code': '1018683',
-                'river_width_m': 900.0,
-                'river_depth_m': 6.0,
-            }],
-        ),
-        Node(
-            package='arda_bringup',
-            executable='web_bridge_node',
-            name='web_bridge_node',
-            output='screen',
-            parameters=[{
-                # FastAPI 서버 바인드 주소 — 브라우저에서 http://<host>:<port> 로 접속
-                'web_server_host': '0.0.0.0',
-                'web_server_port': 8000,
-            }],
-        ),
+        # 표류 예측(drift_node)은 노트북(arda-algo_general)이 담당 —
+        # radar_worker.py/thermal_worker.py가 이미 쓰던 report_url
+        # (send_fall_report())로 좌표+열화상 이미지를 HTTP로 넘긴다.
+        # Jetson에서 다시 계산할 필요가 없어 꺼둔다.
+        # Node(
+        #     package='arda_bringup',
+        #     executable='drift_node',
+        #     name='drift_node',
+        #     output='screen',
+        #     parameters=[{
+        #         'num_particles': 200,
+        #         'turbulence': 0.3,
+        #         'diffusivity_m': 2.0,
+        #         'dt': 0.1,
+        #         # 1 스텝 tick당 시뮬레이션 스텝 수 (배속). 드론 실기 연동에는 1을
+        #         # 쓴다 — 60이면 약 90배속이라 드론이 이륙하기도 전에 파티클이
+        #         # 지도를 벗어난다. 드론 없이 빠르게 보고 싶으면 값을 올리면 된다.
+        #         'playback_speed': 1,
+        #         'step_period_sec': 0.1,
+        #
+        #         # ── 실물 축소 지도 (드론 미션 좌표 변환의 기준) ──
+        #         'map_scale': 150.0,        # 축척 1:150
+        #         'map_print_w_m': 3.0,      # 실물 지도 가로(m)
+        #         'map_print_h_m': 2.0,      # 실물 지도 세로(m)
+        #         'map_east_m': 50.0,        # 입수 지점에서 동쪽 여유(실제 m)
+        #         'grid_cell_m': 15.0,
+        #         'hist_half_life_sec': 20.0,
+        #         'nms_max_count': 10,
+        #         'takeoff_margin_map_m': 0.30,  # 드론 이륙 지점: 지도 밖 여유(실물 m)
+        #
+        #         # ════════════════════════════════════════════════════════
+        #         # 유속 설정 — arda-algo_general/hanriver.py 와 동일한 전환 방식
+        #         # (자세한 설명은 drift_node.py 상단 주석 참고)
+        #         # ════════════════════════════════════════════════════════
+        #         # [기본] 고정 유속 — API 키 없이 바로 실행 가능. 값만 바꿔서 사용:
+        #         'velocity_x': -1.5,   # m/s, 서쪽 방향 (한강 평균)
+        #         'velocity_y': 0.05,   # m/s, 남쪽 방향
+        #
+        #         # [전환] 실시간 HRFCO API 유속을 쓰려면 아래 두 줄을 채우고
+        #         #        use_hrfco_api 를 True 로 바꾸세요:
+        #         'use_hrfco_api': False,
+        #         'hrfco_api_key': '',       # ← 여기에 HRFCO API 키 입력 (발급: hrfco.go.kr/web/openapiPage/openApi.do)
+        #         'hrfco_obs_code': '1018683',
+        #         'river_width_m': 900.0,
+        #         'river_depth_m': 6.0,
+        #     }],
+        # ),
+        # 웹 UI + 드론 제어(web_bridge_node)도 노트북(arda-algo_general,
+        # drone_control 브랜치의 hanriver.py + drone_api.py)이 담당 —
+        # Jetson이 자체 웹 서버를 띄우지 않는다.
+        # Node(
+        #     package='arda_bringup',
+        #     executable='web_bridge_node',
+        #     name='web_bridge_node',
+        #     output='screen',
+        #     parameters=[{
+        #         # FastAPI 서버 바인드 주소 — 브라우저에서 http://<host>:<port> 로 접속
+        #         'web_server_host': '0.0.0.0',
+        #         'web_server_port': 8000,
+        #     }],
+        # ),
     ])

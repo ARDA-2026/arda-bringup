@@ -134,7 +134,7 @@ class Bus:
         # 이 큐를 읽지 않는다.
         self.servo_status_q = LatestQueue()
         # thermal -> 웹 시각화/rosbag 기록(선택적). 관찰 중 매 프레임의
-        # matched/consecutive/confirmed 판정 상태 — "사람 확정까지 얼마나
+        # matched/match_count/confirmed 판정 상태 — "사람 확정까지 얼마나
         # 가까워졌는지"를 라이브로 볼 수 있게 한다. raset 자체 로직은
         # 이 큐를 읽지 않는다.
         self.thermal_status_q = LatestQueue()

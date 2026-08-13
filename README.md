@@ -202,16 +202,17 @@ curl -X POST http://localhost:8000/drone/land
 켜면 각각 `/thermal.jpg` 폴링(0.3초 간격, 관찰 중일 때만 프레임이 옴)과
 `radar_frame`의 포인트클라우드/클러스터가 캔버스에 실시간으로 그려진다.
 
-`dwell_seconds`를 튜닝하면서 "사람 확정에 얼마나 가까워졌는지"(연속
-매칭 프레임 수, give-up까지 남은 시간)를 실시간으로 보고 싶으면:
+`dwell_seconds`를 튜닝하면서 "사람 확정에 얼마나 가까워졌는지"(누적
+매칭 횟수 — 연속일 필요 없음, give-up까지 남은 시간)를 실시간으로 보고
+싶으면:
 
 ```bash
 ros2 topic echo /arda/tracker/thermal_status
 ```
 
-관찰(dwell) 중에만 프레임마다(2Hz) `matched`/`consecutive`/
-`required_consecutive`/`confirmed`/`give_up_remaining_sec`가 찍힌다.
-`consecutive`가 `required_consecutive`에 도달하면(`confirmed: true`)
+관찰(dwell) 중에만 프레임마다(2Hz) `matched`/`match_count`/
+`required_matches`/`confirmed`/`give_up_remaining_sec`가 찍힌다.
+`match_count`가 `required_matches`에 도달하면(`confirmed: true`)
 바로 다음에 `/arda/tracker/absolute_pose`가 발행된다.
 
 ### 센서 타이밍 분석 (rosbag 녹화)
@@ -384,7 +385,7 @@ flowchart LR
 | `/arda/tracker/detection_confirmed` | `Image` | 사람이 확정된 **그 순간**의 열화상 프레임 1장 (확정 이벤트마다만 발행) — 웹 패널 맨 위 "🎯 사람 확인됨" 카드에 시각과 함께 표시됨. `enable_thermal_view`와 무관하게 항상 발행 |
 | `/arda/tracker/radar_frame` | `String`(JSON) | 레이더 포인트클라우드/클러스터 스냅샷(시각화 전용, 5Hz) — `points`, `n_clusters`, `cluster_centroids`. `enable_radar_view=false`면 발행 안 함 |
 | `/arda/tracker/servo_status` | `String`(JSON) | 서보 각도/dwell 상태 스냅샷(5Hz, 항상 발행) — `angle`, `dwelling`, `dwell_remaining_sec`, `thermal_engaged`. rosbag 타이밍 분석용 |
-| `/arda/tracker/thermal_status` | `String`(JSON) | 열화상 판정 진행 상태(관찰 중에만, 프레임마다) — `matched`, `consecutive`/`required_consecutive`, `moving`, `confirmed`, `give_up_remaining_sec`, `detail`(원형도/종횡비/채움비율 등 실제 판정 수치 + 임계값, threshold 백엔드 기준. `--yolo`면 `confidence`만). **"사람인지 잡는 그 포인트"(matched가 왜 true/false인지) 확인은 이 토픽의 `detail`을 보면 된다** |
+| `/arda/tracker/thermal_status` | `String`(JSON) | 열화상 판정 진행 상태(관찰 중에만, 프레임마다) — `matched`, `match_count`/`required_matches`(누적 매칭 횟수 — 연속일 필요 없음), `moving`, `confirmed`, `give_up_remaining_sec`, `detail`(원형도/종횡비/채움비율 등 실제 판정 수치 + 임계값, threshold 백엔드 기준. `--yolo`면 `confidence`만). **"사람인지 잡는 그 포인트"(matched가 왜 true/false인지) 확인은 이 토픽의 `detail`을 보면 된다** |
 
 **주요 파라미터**
 
@@ -393,8 +394,10 @@ flowchart LR
 | `radar_dir` / `servo_dir` / `thermal_dir` | `''` (필수) | 각 저장소 경로. 비우면 `ARDA_RADAR_DIR` 등 환경변수 |
 | `simulate_servo` / `simulate_thermal` / `no_radar` | false / false / false | 센서 없이 시뮬레이션/생략 |
 | `yolo` / `model_path` / `confidence_threshold` / `device` | false / `''` / 0.4 / `'cuda'` | 열화상 YOLO 판정 (기본은 threshold) |
-| `dwell_seconds` / `required_consecutive` / `settle_offset` | 10.0 / 3 / 0.15 | 열화상 관찰 파라미터 |
-| `thermal_pending_timeout` | **-1**(자동 = `dwell_seconds+30.0`) | 레이더가 열화상 판정을 기다리는 최대 시간 — 아래 "⚠️ 실측으로 찾은 버그" 참고 |
+| `dwell_seconds` / `required_matches` / `settle_offset` | 10.0 / 3 / 0.15 | 열화상 관찰 파라미터. `required_matches`는 누적 매칭 횟수(연속일 필요 없음) |
+| `dwell_margin_seconds` | 30.0 | `thermal_pending_timeout`/`servo_dwell_seconds` 자동 계산이 공유하는 안전 마진 (sensor.md §1 참고) |
+| `thermal_pending_timeout` | **-1**(자동 = `dwell_seconds+dwell_margin_seconds`) | 레이더가 열화상 판정을 기다리는 최대 시간 — 아래 "⚠️ 실측으로 찾은 버그" 참고 |
+| `servo_dwell_seconds` | **-1**(자동 = `max(yaml 값, dwell_seconds+dwell_margin_seconds)`) | 서보가 마지막 조준 각도에서 버티는 시간 (sensor.md §2 참고) |
 | `radar_cli_port` / `radar_data_port` | `/dev/ttyUSB0` / `/dev/ttyUSB1` | 레이더 시리얼 포트 |
 | `enable_thermal_view` / `enable_radar_view` | true / true | 웹 화면 시각화용 토픽 발행 on/off (끄면 대역폭 절약, 브라우저 체크박스로도 별도 제어) |
 | `show_thermal` | false | raset의 `--show-thermal`과 동일 — 관찰 중 열화상 컬러맵을 이 보드에 붙은 모니터(X11, `DISPLAY` 필요)에 로컬 창으로도 띄움. `enable_thermal_view`(ROS/웹 발행)와 독립적, `DISPLAY` 없으면 자동 무시 |
@@ -415,11 +418,12 @@ give-up 카운트다운 자체가 계속 리셋되기 때문입니다(`thermal_w
 화면 가장자리에서 계속 "움직이는" 상태로 오래 머무는 경로(=give-up
 카운트다운 자체가 계속 리셋되는 경우)에서는 confirmed=true까지 40초
 넘게 걸리는 것도 실측됐습니다(`/arda/tracker/thermal_status`로 프레임별
-`consecutive`를 직접 보고 확인 — 15초 마진으로는 이 케이스에서 재발
+`match_count`를 직접 보고 확인 — 15초 마진으로는 이 케이스에서 재발
 했음). 그래서 `thermal_pending_timeout`을 명시하지 않으면
-`dwell_seconds+30.0`을 자동으로 쓰도록 고쳤습니다(`tracker_node.py`의
-`_start_raset()` 계산부 주석 참고). `raset/` 코드 자체는 건드리지
-않았습니다 — 이 값은 raset이 그대로 받는 파라미터라 상위(`arda_bringup`)
+`dwell_seconds+dwell_margin_seconds`(기본 30.0)를 자동으로 쓰도록
+고쳤습니다(`tracker_node.py`의 `_start_raset()` 계산부 주석 참고).
+`raset/` 코드 자체는 건드리지 않았습니다 — 이 값은 raset이 그대로 받는
+파라미터라 상위(`arda_bringup`)
 레이어에서 안전한 기본값을 계산해 넘기는 것만으로 충분합니다. 다만
 열원이 병적으로 계속 흔들리며 `settle_offset` 안으로 절대 안 들어오면
 이 마진도 여전히 부족할 수 있습니다(raset 자체의 give-up 로직이
