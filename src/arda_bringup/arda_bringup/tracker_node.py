@@ -52,6 +52,15 @@ ROS2 노드로 감쌌다. `raset` 자체는 더 이상 외부 경로에 의존�
   확정까지 얼마나 가까워졌는지"(연속 매칭 프레임 수 등)를 dwell_seconds
   튜닝하면서 바로 확인할 때 이 토픽을 본다.
 
+HTTP로도 내보내고 싶으면(예: algo_general/hanriver.py를 다른 PC에서 별도로
+띄워 웹으로 보고 싶은 경우) 이 노드의 `report_url` 파라미터 하나만 채우면
+된다 — 열화상 이미지(thermal_worker)와 낙하 좌표(ServoController) 둘 다
+같은 그 값을 쓴다(`_start_raset()` 참고). 비워두면(기본값) HTTP 전송은
+하지 않고, 위 ROS 토픽들과 web_bridge_node의 자체 FastAPI 서버로만 나간다.
+arda-radar/arda-servo 각자의 settings.yaml에 있는 site.report_url은 이
+노드 안에서는 더 이상 읽지 않는다 — 두 파일을 따로 맞춰야 했던 예전 방식
+대신, bringup.launch.py 파라미터 한 곳만 고치면 되도록 통일했다.
+
 arda-raset 자체를 손대지 않기 위해, bus 큐를 subclass하거나 대체하지 않고
 "콜백을 먼저 실행한 뒤 원본 큐에 그대로 전달"하는 극소 Tee 래퍼로 감싼다 —
 raset의 세 워커 스레드는 원래 큐와 100% 동일하게 동작한다(get()으로 값을
@@ -154,6 +163,14 @@ class TrackerNode(Node):
         self.declare_parameter('radar_profile', '')       # 비우면 <radar_dir>/config/profiles/xwr68xx_AOP_profile_short_range.cfg
         self.declare_parameter('servo_config', '')        # 비우면 <servo_dir>/config/settings.yaml
 
+        # 낙하 데이터를 HTTP로 내보낼 주소 — 열화상 이미지 스트리밍
+        # (thermal_worker)과 낙하 좌표 보고(ServoController) 양쪽 모두 이
+        # 값 하나만 쓴다(단일 설정 지점). 비우면 HTTP 전송은 하지 않고
+        # ROS 토픽(/arda/tracker/*, web_bridge_node가 자체 서빙)으로만
+        # 나간다 — arda-radar/arda-servo 각자의 settings.yaml에 있는
+        # site.report_url은 이 노드가 더 이상 읽지 않는다.
+        self.declare_parameter('report_url', '')
+
         # ════════════════════════════════════════════════════════════════
         # 센서 시각화 on/off — 웹 화면에 열화상/레이더 데이터를 띄울지 여부.
         # 끄면 해당 토픽 발행 자체를 건너뛰어 ROS/웹 대역폭을 아낀다. 사람
@@ -238,7 +255,6 @@ class TrackerNode(Node):
         sys.path.insert(0, str(thermal_dir / 'src'))         # -> import thermal_main / thermal_main_yolo
 
         import yaml
-        from arda.utils import load_settings
         from .raset import radar_worker, servo_worker, thermal_worker, thermal_backend
         from .raset.bus import Bus
 
@@ -274,10 +290,21 @@ class TrackerNode(Node):
             Path(servo_config_param) if servo_config_param
             else servo_dir / 'config' / 'settings.yaml')
 
-        report_url = load_settings(radar_settings_path).get('site', {}).get('report_url', '')
+        # 열화상 이미지 스트리밍(thermal_worker)과 좌표 보고(ServoController)
+        # 둘 다 이 노드의 report_url 파라미터 하나만 참조하도록 통일한다 —
+        # arda-radar/arda-servo 각자의 settings.yaml site.report_url은 더
+        # 이상 읽지 않는다(예전에는 arda-radar 것 하나만 읽어 좌표/이미지
+        # 둘 다에 썼었는데, 좌표 보고가 ServoController로 옮겨가면서 두
+        # 파일을 따로 맞춰줘야 하는 번거로움이 생겼었다 — 이 파라미터로
+        # 다시 한 곳만 고치면 되게 되돌린다).
+        report_url = self.get_parameter('report_url').value or ''
 
         with open(servo_config_path, encoding='utf-8') as f:
             servo_cfg = yaml.safe_load(f)
+        if report_url:
+            site_section = servo_cfg.get('site') or {}
+            site_section['report_url'] = report_url
+            servo_cfg['site'] = site_section
 
         bus = Bus()
         self._bus = bus  # _on_radar_view_timer()가 radar_frame_q를 읽는 데 씀

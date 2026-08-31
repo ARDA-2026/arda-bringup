@@ -65,6 +65,13 @@ def generate_launch_description():
                 'radar_cli_port': '/dev/ttyUSB0',
                 'radar_data_port': '/dev/ttyUSB1',
 
+                # 낙하 데이터를 HTTP로 내보낼 주소 — 열화상 이미지와 낙하
+                # 좌표(열화상 추적 보정 후) 둘 다 이 값 하나만 참조한다.
+                # algo_general(hanriver.py)을 다른 PC에서 별도로 띄워서
+                # 웹으로 보고 싶을 때만 채우면 된다. 비우면 HTTP 전송은
+                # 안 하고 ROS 토픽 + web_bridge_node 자체 웹 서버로만 나감.
+                'report_url': 'http://172.30.139.191:8000/report',
+
                 # 센서 시각화 on/off — 웹 패널의 체크박스로도 별도 제어되며,
                 # 여기서 끄면 해당 토픽 자체를 발행하지 않는다.
                 'enable_thermal_view': True,
