@@ -20,11 +20,15 @@ ROS2 노드로 감쌌다. `raset` 자체는 더 이상 외부 경로에 의존�
   열화상에 확인을 요청하는 순간(raset의 `bus.trigger_q`) — 아직 확정이
   아니라 "이 자리를 봐달라"는 요청 신호다.
 - `/arda/tracker/absolute_pose` (PoseWithCovarianceStamped): 열화상이
-  "사람 맞음"으로 확정한 순간(raset의 `bus.verdict_q`에서 person=True)의
-  GPS 좌표 (position.x=경도, position.y=위도 — 이 패키지 전체의 좌표 규약).
-  레이더 단독 후보(열화상 미확인)는 발행하지 않는다 — arda-raset 자체가
-  그렇게 설계돼 있다(열화상이 없으면 이 확정 이벤트 자체가 없고, raset은
-  로그만 남긴다. `raset/radar_worker.py`의 `thermal_gate=False` 분기 참고).
+  "사람 맞음"으로 확정한 순간의 GPS 좌표 (position.x=경도, position.y=위도
+  — 이 패키지 전체의 좌표 규약). 레이더 최초 감지 좌표가 아니라, 열화상
+  추적으로 서보가 재조준을 마친 뒤의 보정 좌표다 — `ServoController`가
+  이 좌표를 계산하는 유일한 곳이라, `raset/servo_worker.py`에 연결한
+  `on_confirmed` 콜백(`_publish_absolute_pose`)이 직접 발행한다(레이더의
+  `bus.verdict_q`/`bus.pending_location`을 거치지 않는다). 레이더 단독
+  후보(열화상 미확인)는 발행하지 않는다 — arda-raset 자체가 그렇게
+  설계돼 있다(열화상이 없으면 이 확정 이벤트 자체가 없고, raset은 로그만
+  남긴다. `raset/radar_worker.py`의 `thermal_gate=False` 분기 참고).
 - `/arda/tracker/thermal_image` (sensor_msgs/Image): 열화상이 낙하 후보를
   관찰(dwell)하는 동안의 프레임(검출 오버레이 포함). raset은 이 프레임을
   기본적으로 `report_url`(HTTP, site 설정이 있을 때만) 또는
@@ -280,14 +284,12 @@ class TrackerNode(Node):
         # detection_trigger 발행: 원본 소비자(thermal_worker)는 그대로 두고
         # put() 시점에만 콜백을 얹는다.
         bus.trigger_q = _TeeQueue(bus.trigger_q, self._on_trigger)
-        # absolute_pose 발행: verdict(person 확정 여부)가 나오는 순간
-        # pending_location(그 판정을 기다리던 좌표)을 같이 스냅샷한다.
-        # _TeeQueue.put()이 콜백을 원본 큐 put()보다 먼저 실행하므로,
-        # radar_worker(원본 소비자)가 이 verdict를 get()해서
-        # pending_location.clear()를 하기 전에 이 콜백이 항상 먼저 읽는다
-        # (put()/get() 두 스레드 사이의 순서 보장 — 자세한 이유는 _TeeQueue
-        # 클래스 docstring 참고).
-        bus.verdict_q = _TeeQueue(bus.verdict_q, lambda v: self._on_verdict(v, bus))
+        # detection_confirmed 스냅샷 발행: verdict(person 확정)가 나오는
+        # 순간의 열화상 프레임을 같이 보낸다. absolute_pose(좌표) 발행은
+        # 여기서 하지 않는다 — 열화상 추적 보정 좌표를 아는 쪽은
+        # ServoController뿐이라, on_confirmed 콜백(_publish_absolute_pose,
+        # servo_worker.run() 호출부 참고)이 그 발행을 담당한다.
+        bus.verdict_q = _TeeQueue(bus.verdict_q, self._on_verdict)
 
         simulate_servo = bool(self.get_parameter('simulate_servo').value)
         simulate_thermal = bool(self.get_parameter('simulate_thermal').value)
@@ -348,7 +350,13 @@ class TrackerNode(Node):
 
         # 서보는 항상 기동한다 — GPIO가 없으면 arda-servo가 자동으로
         # 시뮬레이션 모드로 떨어진다 (arda-raset main.py와 동일).
-        _spawn('servo', servo_worker.run, bus, self._stop_event, servo_cfg, simulate_servo)
+        # on_confirmed: 열화상 추적 보정 좌표가 나오는 순간
+        # _publish_absolute_pose로 바로 ROS 토픽 발행 (servo_worker.py
+        # 모듈 docstring 참고).
+        _spawn(
+            'servo', servo_worker.run, bus, self._stop_event, servo_cfg,
+            simulate_servo, self._publish_absolute_pose,
+        )
 
         # 열화상 — 센서 초기화를 스레드를 띄우기 전에 미리 해서, 실패 시
         # (하드웨어 없음, simulate_thermal 아님) 스레드 자체를 안 띄운다.
@@ -386,7 +394,7 @@ class TrackerNode(Node):
             _spawn(
                 'radar', radar_worker.run, bus, self._stop_event,
                 radar_cli_port, radar_data_port, radar_profile_path, radar_settings_path,
-                thermal_started, thermal_pending_timeout, report_url,
+                thermal_started, thermal_pending_timeout,
             )
 
         # 레이더 시각화 — bus.radar_frame_q(LatestQueue, raset/radar_worker.py가
@@ -451,20 +459,29 @@ class TrackerNode(Node):
         msg.data = True
         self._pub_trigger.publish(msg)
 
-    def _on_verdict(self, verdict, bus):
+    def _publish_absolute_pose(self, lat: float, lon: float) -> None:
+        """`/arda/tracker/absolute_pose`를 발행한다.
+
+        arda_servo.ServoController(raset/servo_worker.py의 on_confirmed
+        콜백)가 열화상 추적 후 계산한 보정 좌표로 호출된다 — 레이더 최초
+        감지 좌표(bus.pending_location)가 아니다. 이 콜백은 서보 워커
+        스레드에서 호출되는데, rclpy Publisher.publish()는 어느 스레드에서
+        호출해도 안전하므로 문제 없다(이 노드가 이미 _on_trigger/_on_verdict
+        등에서 raset 워커 스레드로부터 직접 publish()를 호출하는 것과 같은
+        패턴 — _TeeQueue 콜백도 마찬가지로 워커 스레드에서 실행된다).
+        """
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.pose.pose.position.x = lon
+        msg.pose.pose.position.y = lat
+        self._pub_pose.publish(msg)
+
+    def _on_verdict(self, verdict):
         if not getattr(verdict, 'person', False):
             return
-        loc = bus.pending_location.get()
-        if loc is None:
-            return
-        stamp = self.get_clock().now().to_msg()
 
-        msg = PoseWithCovarianceStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = 'map'
-        msg.pose.pose.position.x = loc.lon
-        msg.pose.pose.position.y = loc.lat
-        self._pub_pose.publish(msg)
+        stamp = self.get_clock().now().to_msg()
 
         # 확정된 그 순간의 열화상 프레임을 스냅샷으로 같이 보낸다 (있으면).
         # thermal_worker의 관찰 루프 안에서 person=True가 나오는 프레임이

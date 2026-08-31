@@ -13,10 +13,18 @@ KeyboardInterrupt를 자체적으로 잡는데, 백그라운드 스레드는 SIG
 기록용으로 현재 각도·dwell 상태를 `bus.servo_status_q`에 얹는다(dwell/
 추적 로직 자체는 건드리지 않는 부가 발행 — arda_bringup의
 `enable_radar_view`와 같은 원칙, radar_worker.py 참고).
+
+`on_confirmed` 콜백: 열화상이 사람을 확정하는 순간 `ServoController`가
+계산한 열화상 추적 후 보정 좌표(위도/경도)를 그대로 전달받는다 — 레이더
+최초 감지 좌표(`bus.pending_location`)가 아니다. tracker_node.py가 이
+콜백으로 `/arda/tracker/absolute_pose` ROS 토픽을 발행한다(웹으로 나가는
+좌표가 실제로 이 토픽을 거치므로, HTTP `report_url`과는 별개로 이 콜백이
+arda_bringup 배포에서는 진짜 "웹 전송 좌표" 경로다 — tracker_node.py 참고).
 """
 
 import threading
 import time
+from typing import Callable
 
 from arda_servo.controller import ServoController
 from arda_servo.servo import PanServo
@@ -27,7 +35,13 @@ from .bus import Bus, QueueReceiver
 logger = get_logger(__name__)
 
 
-def run(bus: Bus, stop_event: threading.Event, cfg: dict, simulate: bool) -> None:
+def run(
+    bus: Bus,
+    stop_event: threading.Event,
+    cfg: dict,
+    simulate: bool,
+    on_confirmed: Callable[[float, float], None] | None = None,
+) -> None:
     servo_cfg = cfg["servo"]
 
     servo = PanServo(
@@ -83,6 +97,8 @@ def run(bus: Bus, stop_event: threading.Event, cfg: dict, simulate: bool) -> Non
         site_lat=site_cfg.get("lat"),
         site_lon=site_cfg.get("lon"),
         site_heading_deg=site_cfg.get("heading_deg", 0.0),
+        report_url=site_cfg.get("report_url", ""),
+        on_confirmed=on_confirmed,
     )
 
     servo.set_angle(center_deg)  # run_forever()가 시작 시 하던 일 그대로 재현
